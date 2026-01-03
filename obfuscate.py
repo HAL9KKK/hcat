@@ -3,7 +3,6 @@ import os
 import shutil
 import json
 import stat
-import re
 from pathlib import Path
 
 # Configuration
@@ -27,7 +26,7 @@ def fix_config_json():
     for key in path_keys:
         if key in config:
             val = config[key]
-            # Convert Windows backslashes and relative paths to a clean relative format
+            # Convert Windows backslashes to relative forward slashes
             new_val = val.replace('\\', '/').rstrip('/')
             if ':' in new_val: # Windows absolute
                 new_val = os.path.basename(new_val) if key != "zaps-path" else "."
@@ -54,6 +53,8 @@ def rename_binaries():
                 old_path = Path(root) / file
                 new_path = Path(root) / NEW_EXE_NAME
                 print(f"  {old_path} -> {new_path}")
+                # Ensure it's not already there or handle as copy
+                if new_path.exists(): os.remove(new_path)
                 shutil.copy2(old_path, new_path)
                 os.remove(old_path)
                 try:
@@ -63,49 +64,85 @@ def rename_binaries():
 def patch_agent():
     if not AGENT_ZIP.exists(): return
     print(f"Patching {AGENT_ZIP}...")
+
+    # Always work on a fresh copy (not corrupted)
+    # If backup doesn't exist, create it from current (assuming it was just restored)
     if not AGENT_ZIP_BAK.exists():
         shutil.copy2(AGENT_ZIP, AGENT_ZIP_BAK)
-
-    # Use a fresh copy from backup for patching to avoid corrupted state from previous failed runs
-    shutil.copy2(AGENT_ZIP_BAK, AGENT_ZIP)
-
+    
     temp_zip = BASE_DIR / 'hashtopolis.zip.tmp'
     
-    with zipfile.ZipFile(AGENT_ZIP, 'r') as zin, zipfile.ZipFile(temp_zip, 'w') as zout:
+    with zipfile.ZipFile(AGENT_ZIP_BAK, 'r') as zin, zipfile.ZipFile(temp_zip, 'w') as zout:
         for item in zin.infolist():
             content = zin.read(item.filename).decode('utf-8', errors='ignore')
+            lines = content.splitlines()
+            new_lines = []
             
-            if item.filename == 'htpclient/config.py':
-                # Force absolute paths for all directory settings
-                # Ensure val is defined within the scope of existence check
-                content = content.replace(
-                    "return self.config[key]",
-                    "val = self.config[key]\n            if key.endswith('-path'): return os.path.abspath(val)\n            return val"
-                )
-                # Ensure 'import os' is available (if only 'import os.path' exists)
-                if 'import os\n' not in content and 'import os\r\n' not in content:
-                    content = "import os\n" + content
+            patched = False
+            for line in lines:
+                # 1. config.py patch
+                if item.filename == 'htpclient/config.py':
+                    if "return self.config[key]" in line:
+                        new_lines.append("        val = self.config[key]")
+                        new_lines.append("        if key.endswith('-path'): return os.path.abspath(val)")
+                        new_lines.append("        return val")
+                        patched = True
+                        continue
+                
+                # 2. binarydownload.py patch
+                elif item.filename == 'htpclient/binarydownload.py':
+                    if "ans['executable']" in line and 'pippo.bin' not in line:
+                        line = line.replace("ans['executable']", "ans['executable'].replace('hashcat.bin', 'pippo.bin')")
+                        patched = True
+                
+                # 3. hashcat_cracker.py patch
+                elif item.filename == 'htpclient/hashcat_cracker.py':
+                    # Swap filename
+                    if "['executable']" in line and 'pippo.bin' not in line:
+                        line = line.replace("['executable']", "['executable'].replace('hashcat.bin', 'pippo.bin')")
+                        patched = True
+                    # Resolve path
+                    if "self.executable_path = Path(self.cracker_path, self.executable_name)" in line:
+                        line = line.replace("self.executable_name)", "self.executable_name).resolve()")
+                        new_lines.append(line)
+                        new_lines.append("        try: os.chmod(str(self.executable_path), 0o755)")
+                        new_lines.append("        except: pass")
+                        patched = True
+                        continue
+                    # Fixed callPath
+                    if "self.callPath = f'\"' + './' + self.executable_name + '\"'" in line or "f'./{self.executable_name}'" in line:
+                        line = "        self.callPath = f'{self.executable_path}'"
+                        patched = True
+                    elif "self.callPath = f'\"' + self.executable_name + '\"'" in line:
+                        line = "        self.callPath = f'{self.executable_path}'"
+                        patched = True
+
+                # 4. generic_cracker.py patch
+                elif item.filename == 'htpclient/generic_cracker.py':
+                    if "['executable']" in line and 'pippo.bin' not in line:
+                        line = line.replace("['executable']", "['executable'].replace('hashcat.bin', 'pippo.bin')")
+                        patched = True
+                    if "self.callPath = " in line and "binary_download.get_version()['executable']" in line:
+                        # Reconstruct the line safely
+                        indent = line[:line.find('self.callPath')]
+                        line = f"{indent}self.callPath = os.path.abspath(self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin'))"
+                        new_lines.append(line)
+                        new_lines.append(f"{indent}try: os.chmod(self.callPath, 0o755)")
+                        new_lines.append(f"{indent}except: pass")
+                        patched = True
+                        continue
+
+                new_lines.append(line)
             
-            elif item.filename == 'htpclient/hashcat_cracker.py':
-                # 1. Filename swap
-                content = content.replace("['executable']", "['executable'].replace('hashcat.bin', 'pippo.bin')")
-                # 2. Force absolute executable path
-                content = content.replace("self.executable_name)", "self.executable_name).resolve()")
-                # 3. Fix callPath (remove ./)
-                content = content.replace("f'./{self.executable_name}'", "f'{self.executable_path}'")
-                content = content.replace("f\"'./{self.executable_name}'\"", "f\"'{self.executable_path}'\"")
-                # 4. Mandatory chmod before any usage
-                content = re.sub(r"(self\.executable_path = .*?\n)", r"\1        try:\n            import os\n            os.chmod(str(self.executable_path), 0o755)\n        except: pass\n", content)
-
-            elif item.filename == 'htpclient/generic_cracker.py':
-                content = content.replace("['executable']", "['executable'].replace('hashcat.bin', 'pippo.bin')")
-                # Specifically target the line where self.callPath is first assigned
-                content = re.sub(r"(self\.callPath = )(.*?)(\n)", r"\1os.path.abspath(\2.replace('\"', '').replace(\"'\", ''))\n        try: os.chmod(self.callPath, 0o755)\n        except: pass\n", content)
-
-            elif item.filename == 'htpclient/binarydownload.py':
-                content = content.replace("ans['executable']", "ans['executable'].replace('hashcat.bin', 'pippo.bin')")
-
-            zout.writestr(item, content.encode('utf-8'))
+            if patched:
+                print(f"  Applied patches to {item.filename}")
+                new_content = "\n".join(new_lines)
+                # Ensure import os is present if we use os.path or os.chmod
+                if "os." in new_content and "import os" not in new_content:
+                    new_content = "import os\n" + new_content
+                zout.writestr(item, new_content.encode('utf-8'))
+            else:
+                zout.writestr(item, zin.read(item.filename))
 
     os.remove(AGENT_ZIP)
     os.rename(temp_zip, AGENT_ZIP)
@@ -115,4 +152,4 @@ if __name__ == "__main__":
     fix_config_json()
     rename_binaries()
     patch_agent()
-    print("Done! Push these changes and run on Colab.")
+    print("Done!")
