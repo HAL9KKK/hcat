@@ -1,0 +1,20 @@
+# Large data files
+files/
+
+# Temporary files created by the agent
+inspect_agent.py
+extract_agent.py
+extracted/
+htpclient/hashcat_cracker.py
+hashtopolis.zip.bak
+hashtopolis.zip.tmp
+
+# Log files
+*.log
+
+# 7zip files
+temp.7z
+prince.7z
+
+# Other junk
+temp/
