@@ -22,7 +22,6 @@ def fix_config_paths():
     with open(CONFIG_FILE, 'r') as f:
         config = json.load(f)
     
-    # Map of keys to their desired relative values
     path_map = {
         "files-path": "files",
         "crackers-path": "crackers",
@@ -34,14 +33,11 @@ def fix_config_paths():
     modified = False
     for key, rel_val in path_map.items():
         if key in config:
-            # If path contains ':' or '\', or is absolute, reset to relative
             if ':' in config[key] or '\\' in config[key] or config[key].startswith('/'):
                 print(f"  {key}: {config[key]} -> {rel_val}")
                 config[key] = rel_val
                 modified = True
     
-    # ALSO clear token and uuid if they are present and non-empty
-    # This ensures a fresh registration on the new environment
     if config.get("token") or config.get("uuid"):
         print("  Clearing token and uuid for fresh registration...")
         config["token"] = ""
@@ -77,7 +73,6 @@ def patch_agent():
 
     print(f"Patching {AGENT_ZIP}...")
     
-    # Backup
     if not AGENT_ZIP_BAK.exists():
         shutil.copy2(AGENT_ZIP, AGENT_ZIP_BAK)
 
@@ -85,14 +80,21 @@ def patch_agent():
     
     files_to_patch = {
         'htpclient/hashcat_cracker.py': [
+            # 1. Rename logic
             ("self.executable_name = binary_download.get_version()['executable']", 
              "self.executable_name = binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
+            # 2. Path resolution fix (crucial for Linux/Colab)
+            ("self.executable_path = Path(self.cracker_path, self.executable_name)",
+             "self.executable_path = Path(self.cracker_path, self.executable_name).resolve()"),
         ],
         'htpclient/generic_cracker.py': [
             ("self.executable_name = binary_download.get_version()['executable']",
              "self.executable_name = binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
             ("binary_download.get_version()['executable']",
-             "binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')")
+             "binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
+            # Fix callPath to be absolute
+            ("self.callPath = self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable']",
+             "self.callPath = os.path.abspath(self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin'))")
         ],
         'htpclient/binarydownload.py': [
              ("ans['executable']", "ans['executable'].replace('hashcat.bin', 'pippo.bin')")
@@ -118,6 +120,7 @@ def patch_agent():
     print("Agent patched successfully.")
 
 if __name__ == "__main__":
+    # Ensure backups or fresh state if needed
     fix_config_paths()
     rename_binaries()
     patch_agent()
