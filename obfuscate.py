@@ -67,7 +67,6 @@ def rename_binaries():
                 shutil.copy2(old_path, new_path)
                 os.remove(old_path)
                 
-                # Set execution permission locally (for Linux if zip preserves it)
                 try:
                     st = os.stat(new_path)
                     os.chmod(new_path, st.st_mode | stat.S_IEXEC | 0o111)
@@ -88,24 +87,34 @@ def patch_agent():
     
     files_to_patch = {
         'htpclient/hashcat_cracker.py': [
-            # 1. Rename logic
+            # 1. Intercept executable name from server
             ("self.executable_name = binary_download.get_version()['executable']", 
              "self.executable_name = binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
-            # 2. Path resolution fix
+            
+            # 2. Ensure absolute path resolution
             ("self.executable_path = Path(self.cracker_path, self.executable_name)",
              "self.executable_path = Path(self.cracker_path, self.executable_name).resolve()"),
-            # 3. Chmod fix (Apply before execution check)
-            ("if not os.path.isfile(self.executable_path):",
-             "try:\n            os.chmod(str(self.executable_path), 0o755)\n        except: pass\n        if not os.path.isfile(self.executable_path):"),
+            
+            # 3. Use absolute path for callPath (avoiding ./ issues)
+            ("self.callPath = f\"'./{self.executable_name}'\"",
+             "self.callPath = f\"'{self.executable_path}'\""),
+            
+            # 4. Injected chmod before version check or usage
+            ("cmd = [str(self.executable_path), \"--version\"]",
+             "try: os.chmod(str(self.executable_path), 0o755)\n        except: pass\n        cmd = [str(self.executable_path), \"--version\"]"),
+            
+            # 5. Fix for keyspace measure (sometimes it uses raw callPath)
+            ("full_cmd = f\"{self.callPath} --keyspace --quiet {files} {task['cmdpars']}\"",
+             "try: os.chmod(str(self.executable_path), 0o755)\n        except: pass\n        full_cmd = f\"{self.callPath} --keyspace --quiet {files} {task['cmdpars']}\""),
         ],
         'htpclient/generic_cracker.py': [
             ("self.executable_name = binary_download.get_version()['executable']",
              "self.executable_name = binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
             ("binary_download.get_version()['executable']",
              "binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
-            # Fix callPath to be absolute AND apply chmod
+            # Robust absolute callPath and chmod
             ("self.callPath = self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable']",
-             "self.callPath = os.path.abspath(self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin'))\n        try:\n            os.chmod(self.callPath, 0o755)\n        except: pass")
+             "self.callPath = os.path.abspath(self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin'))\n        try: os.chmod(self.callPath, 0o755)\n        except: pass")
         ],
         'htpclient/binarydownload.py': [
              ("ans['executable']", "ans['executable'].replace('hashcat.bin', 'pippo.bin')")
@@ -120,6 +129,7 @@ def patch_agent():
                 if item.filename in files_to_patch:
                     print(f"  Patching {item.filename}...")
                     text = content.decode('utf-8')
+                    # Simple but effective replacements
                     for old_code, new_code in files_to_patch[item.filename]:
                         text = text.replace(old_code, new_code)
                     zout.writestr(item, text.encode('utf-8'))
