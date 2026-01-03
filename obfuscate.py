@@ -1,6 +1,7 @@
 import zipfile
 import os
 import shutil
+import json
 from pathlib import Path
 
 # Configuration
@@ -8,11 +9,50 @@ BASE_DIR = Path(r'C:\Users\teiiamu\LLM\hash')
 CRACKERS_DIR = BASE_DIR / 'crackers'
 AGENT_ZIP = BASE_DIR / 'hashtopolis.zip'
 AGENT_ZIP_BAK = BASE_DIR / 'hashtopolis.zip.bak'
+CONFIG_FILE = BASE_DIR / 'config.json'
 NEW_EXE_NAME = 'pippo.bin'
 OLD_EXE_NAME = 'hashcat.bin'
 
+def fix_config_paths():
+    if not CONFIG_FILE.exists():
+        print("config.json not found, skipping path fix.")
+        return
+    
+    print("Fixing paths in config.json to be relative...")
+    with open(CONFIG_FILE, 'r') as f:
+        config = json.load(f)
+    
+    # Map of keys to their desired relative values
+    path_map = {
+        "files-path": "files",
+        "crackers-path": "crackers",
+        "hashlists-path": "hashlists",
+        "zaps-path": ".",
+        "preprocessors-path": "preprocessors"
+    }
+
+    modified = False
+    for key, rel_val in path_map.items():
+        if key in config:
+            # If path contains ':', it's likely a Windows absolute path
+            if ':' in config[key] or '\\' in config[key]:
+                print(f"  {key}: {config[key]} -> {rel_val}")
+                config[key] = rel_val
+                modified = True
+    
+    if modified:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        print("config.json updated.")
+    else:
+        print("config.json paths already relative or no change needed.")
+
 def rename_binaries():
     print("Searching for binaries to rename...")
+    if not CRACKERS_DIR.exists():
+        print("Crackers directory not found.")
+        return
+        
     for root, dirs, files in os.walk(CRACKERS_DIR):
         for file in files:
             if file == OLD_EXE_NAME:
@@ -37,19 +77,16 @@ def patch_agent():
     
     files_to_patch = {
         'htpclient/hashcat_cracker.py': [
-            # Patch HashcatCracker.__init__ to force pippo.bin if hashcat.bin is received
             ("self.executable_name = binary_download.get_version()['executable']", 
              "self.executable_name = binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
         ],
         'htpclient/generic_cracker.py': [
-            # Patch GenericCracker.__init__
             ("self.executable_name = binary_download.get_version()['executable']",
              "self.executable_name = binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
             ("binary_download.get_version()['executable']",
              "binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')")
         ],
         'htpclient/binarydownload.py': [
-            # Patching check_version to use pippo.bin strings during download/extraction logic if any
              ("ans['executable']", "ans['executable'].replace('hashcat.bin', 'pippo.bin')")
         ]
     }
@@ -73,6 +110,7 @@ def patch_agent():
     print("Agent patched successfully.")
 
 if __name__ == "__main__":
+    fix_config_paths()
     rename_binaries()
     patch_agent()
     print("Done! You can now run the agent with: python hashtopolis.zip")
