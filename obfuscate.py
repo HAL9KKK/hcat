@@ -18,7 +18,7 @@ def fix_config_paths():
         print("config.json not found, skipping path fix.")
         return
     
-    print("Fixing paths in config.json to be relative...")
+    print("Fixing paths and resetting identity in config.json...")
     with open(CONFIG_FILE, 'r') as f:
         config = json.load(f)
     
@@ -34,18 +34,26 @@ def fix_config_paths():
     modified = False
     for key, rel_val in path_map.items():
         if key in config:
-            # If path contains ':', it's likely a Windows absolute path
-            if ':' in config[key] or '\\' in config[key]:
+            # If path contains ':' or '\', or is absolute, reset to relative
+            if ':' in config[key] or '\\' in config[key] or config[key].startswith('/'):
                 print(f"  {key}: {config[key]} -> {rel_val}")
                 config[key] = rel_val
                 modified = True
+    
+    # ALSO clear token and uuid if they are present and non-empty
+    # This ensures a fresh registration on the new environment
+    if config.get("token") or config.get("uuid"):
+        print("  Clearing token and uuid for fresh registration...")
+        config["token"] = ""
+        config["uuid"] = ""
+        modified = True
     
     if modified:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
         print("config.json updated.")
     else:
-        print("config.json paths already relative or no change needed.")
+        print("config.json already cleaned.")
 
 def rename_binaries():
     print("Searching for binaries to rename...")
@@ -113,4 +121,4 @@ if __name__ == "__main__":
     fix_config_paths()
     rename_binaries()
     patch_agent()
-    print("Done! You can now run the agent with: python hashtopolis.zip")
+    print("Done! You can now run the agent with: python hashtopolis.zip --voucher VOUCHER")
