@@ -27,7 +27,7 @@ def fix_config_json():
         if key in config:
             val = config[key]
             # Convert Windows backslashes to relative forward slashes
-            new_val = val.replace('\\', '/').rstrip('/')
+            new_val = str(val).replace('\\', '/').rstrip('/')
             if ':' in new_val: # Windows absolute
                 new_val = os.path.basename(new_val) if key != "zaps-path" else "."
             if new_val != val:
@@ -53,7 +53,6 @@ def rename_binaries():
                 old_path = Path(root) / file
                 new_path = Path(root) / NEW_EXE_NAME
                 print(f"  {old_path} -> {new_path}")
-                # Ensure it's not already there or handle as copy
                 if new_path.exists(): os.remove(new_path)
                 shutil.copy2(old_path, new_path)
                 os.remove(old_path)
@@ -65,27 +64,29 @@ def patch_agent():
     if not AGENT_ZIP.exists(): return
     print(f"Patching {AGENT_ZIP}...")
 
-    # Always work on a fresh copy (not corrupted)
-    # If backup doesn't exist, create it from current (assuming it was just restored)
+    # We expect AGENT_ZIP to be the restored clean version from git
+    # If backup doesn't exist, create it from current
     if not AGENT_ZIP_BAK.exists():
         shutil.copy2(AGENT_ZIP, AGENT_ZIP_BAK)
     
     temp_zip = BASE_DIR / 'hashtopolis.zip.tmp'
     
-    with zipfile.ZipFile(AGENT_ZIP_BAK, 'r') as zin, zipfile.ZipFile(temp_zip, 'w') as zout:
+    with zipfile.ZipFile(AGENT_ZIP, 'r') as zin, zipfile.ZipFile(temp_zip, 'w') as zout:
         for item in zin.infolist():
             content = zin.read(item.filename).decode('utf-8', errors='ignore')
             lines = content.splitlines()
             new_lines = []
-            
             patched = False
+            
             for line in lines:
-                # 1. config.py patch
+                indent = line[:len(line) - len(line.lstrip())]
+                
+                # 1. config.py patch (preserve original indentation)
                 if item.filename == 'htpclient/config.py':
                     if "return self.config[key]" in line:
-                        new_lines.append("        val = self.config[key]")
-                        new_lines.append("        if key.endswith('-path'): return os.path.abspath(val)")
-                        new_lines.append("        return val")
+                        new_lines.append(f"{indent}val = self.config[key]")
+                        new_lines.append(f"{indent}if key.endswith('-path'): return os.path.abspath(val)")
+                        new_lines.append(f"{indent}return val")
                         patched = True
                         continue
                 
@@ -97,34 +98,29 @@ def patch_agent():
                 
                 # 3. hashcat_cracker.py patch
                 elif item.filename == 'htpclient/hashcat_cracker.py':
-                    # Swap filename
-                    if "['executable']" in line and 'pippo.bin' not in line:
+                    if "['executable']" in line and "pippo.bin" not in line:
                         line = line.replace("['executable']", "['executable'].replace('hashcat.bin', 'pippo.bin')")
                         patched = True
-                    # Resolve path
                     if "self.executable_path = Path(self.cracker_path, self.executable_name)" in line:
                         line = line.replace("self.executable_name)", "self.executable_name).resolve()")
                         new_lines.append(line)
-                        new_lines.append("        try: os.chmod(str(self.executable_path), 0o755)")
-                        new_lines.append("        except: pass")
+                        new_lines.append(f"{indent}try: os.chmod(str(self.executable_path), 0o755)")
+                        new_lines.append(f"{indent}except: pass")
                         patched = True
                         continue
-                    # Fixed callPath
-                    if "self.callPath = f'\"' + './' + self.executable_name + '\"'" in line or "f'./{self.executable_name}'" in line:
-                        line = "        self.callPath = f'{self.executable_path}'"
+                    if "f'./{self.executable_name}'" in line or "f\"'./{self.executable_name}'\"" in line:
+                        line = f"{indent}self.callPath = f'{{self.executable_path}}'"
                         patched = True
-                    elif "self.callPath = f'\"' + self.executable_name + '\"'" in line:
-                        line = "        self.callPath = f'{self.executable_path}'"
+                    elif "self.callPath = f'\"' + './' + self.executable_name + '\"'" in line:
+                        line = f"{indent}self.callPath = f'{{self.executable_path}}'"
                         patched = True
 
                 # 4. generic_cracker.py patch
                 elif item.filename == 'htpclient/generic_cracker.py':
-                    if "['executable']" in line and 'pippo.bin' not in line:
+                    if "['executable']" in line and "pippo.bin" not in line:
                         line = line.replace("['executable']", "['executable'].replace('hashcat.bin', 'pippo.bin')")
                         patched = True
                     if "self.callPath = " in line and "binary_download.get_version()['executable']" in line:
-                        # Reconstruct the line safely
-                        indent = line[:line.find('self.callPath')]
                         line = f"{indent}self.callPath = os.path.abspath(self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin'))"
                         new_lines.append(line)
                         new_lines.append(f"{indent}try: os.chmod(self.callPath, 0o755)")
@@ -137,7 +133,6 @@ def patch_agent():
             if patched:
                 print(f"  Applied patches to {item.filename}")
                 new_content = "\n".join(new_lines)
-                # Ensure import os is present if we use os.path or os.chmod
                 if "os." in new_content and "import os" not in new_content:
                     new_content = "import os\n" + new_content
                 zout.writestr(item, new_content.encode('utf-8'))
