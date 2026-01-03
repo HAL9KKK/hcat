@@ -2,6 +2,7 @@ import zipfile
 import os
 import shutil
 import json
+import stat
 from pathlib import Path
 
 # Configuration
@@ -65,6 +66,13 @@ def rename_binaries():
                 print(f"Renaming {old_path} -> {new_path}")
                 shutil.copy2(old_path, new_path)
                 os.remove(old_path)
+                
+                # Set execution permission locally (for Linux if zip preserves it)
+                try:
+                    st = os.stat(new_path)
+                    os.chmod(new_path, st.st_mode | stat.S_IEXEC | 0o111)
+                except Exception as e:
+                    print(f"  Warning: could not set permission on {new_path}: {e}")
 
 def patch_agent():
     if not AGENT_ZIP.exists():
@@ -83,18 +91,21 @@ def patch_agent():
             # 1. Rename logic
             ("self.executable_name = binary_download.get_version()['executable']", 
              "self.executable_name = binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
-            # 2. Path resolution fix (crucial for Linux/Colab)
+            # 2. Path resolution fix
             ("self.executable_path = Path(self.cracker_path, self.executable_name)",
              "self.executable_path = Path(self.cracker_path, self.executable_name).resolve()"),
+            # 3. Chmod fix (Apply before execution check)
+            ("if not os.path.isfile(self.executable_path):",
+             "try:\n            os.chmod(str(self.executable_path), 0o755)\n        except: pass\n        if not os.path.isfile(self.executable_path):"),
         ],
         'htpclient/generic_cracker.py': [
             ("self.executable_name = binary_download.get_version()['executable']",
              "self.executable_name = binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
             ("binary_download.get_version()['executable']",
              "binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin')"),
-            # Fix callPath to be absolute
+            # Fix callPath to be absolute AND apply chmod
             ("self.callPath = self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable']",
-             "self.callPath = os.path.abspath(self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin'))")
+             "self.callPath = os.path.abspath(self.config.get_value('crackers-path') + \"/\" + str(cracker_id) + \"/\" + binary_download.get_version()['executable'].replace('hashcat.bin', 'pippo.bin'))\n        try:\n            os.chmod(self.callPath, 0o755)\n        except: pass")
         ],
         'htpclient/binarydownload.py': [
              ("ans['executable']", "ans['executable'].replace('hashcat.bin', 'pippo.bin')")
@@ -120,7 +131,6 @@ def patch_agent():
     print("Agent patched successfully.")
 
 if __name__ == "__main__":
-    # Ensure backups or fresh state if needed
     fix_config_paths()
     rename_binaries()
     patch_agent()
